@@ -368,7 +368,10 @@ html, body {
   height: 100%;
   position: relative;
   overflow: hidden;
-  background: #111A13;
+  /* Paper, not void: the sheet is landscape and the phone is not, so there is
+     letterboxing above and below it. Matching the drawing background makes it
+     read as margin rather than as something failing to load. */
+  background: #F1F1EC;
 }
 .map-layer {
   position: absolute;
@@ -377,9 +380,12 @@ html, body {
   transform-origin: 0 0;
 }
 .map-image {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
+  position: absolute;
+  /* Size and position come from the measured plan rectangle in JS — the pins
+     are placed from the same numbers, so they cannot drift apart. */
+  max-width: none;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
 /* Map Controls Floating Header */
@@ -2702,6 +2708,9 @@ function useLiveData(showToast) {
 /* ============================================================
    3D TERRAIN COMPONENT (Three.js WebGL with Touch Orbit)
    ============================================================ */
+/* Aspect ratio of the WATG master plan render (3312 x 2339 px), which matches
+   the A1 sheet the chalet percentages were measured from. */
+const PLAN_RATIO = 3312 / 2339;
 const TERRAIN_W = 94.35;
 const TERRAIN_H = 100.0;
 const CROP_X0 = 0.05;
@@ -3000,6 +3009,66 @@ function MobileMapView(_ref3) {
     dist: 0,
     initialZoom: 1.0
   });
+
+  /* The pins and the drawing have to live in ONE coordinate space.
+     Their x/y are percentages of the CAD sheet, so the sheet's rendered
+     rectangle — not the phone screen — is what a percentage must refer to.
+     Letting CSS fit the image (object-fit) and placing pins against the
+     container instead put every chalet in the wrong place, worse the further
+     left it sat, because the sheet is landscape and the screen is not.
+     So we measure the viewport and compute that rectangle ourselves: the
+     image and the pins then use the same numbers by construction. */
+  const viewportRef = useRef(null);
+  const _useState8 = useState({
+      w: 0,
+      h: 0
+    }),
+    vp = _useState8[0],
+    setVp = _useState8[1];
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    const measure = () => setVp({
+      w: el.clientWidth,
+      h: el.clientHeight
+    });
+    measure();
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', measure);
+      return () => window.removeEventListener('resize', measure);
+    }
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [is3D]);
+
+  /* Frame the built area rather than the whole A1 sheet: the chalets occupy
+     roughly the middle-left of it, and showing all the empty hillside would
+     leave them as a cluster of specks on a phone. */
+  const plan = useMemo(() => {
+    if (!vp.w || !vp.h) return null;
+    const xs = data.houses.map(h => h.x),
+      ys = data.houses.map(h => h.y);
+    const pad = 6;
+    const x0 = Math.max(0, Math.min(...xs) - pad) / 100;
+    const x1 = Math.min(100, Math.max(...xs) + pad) / 100;
+    const y0 = Math.max(0, Math.min(...ys) - pad) / 100;
+    const y1 = Math.min(100, Math.max(...ys) + pad) / 100;
+    const cw = x1 - x0,
+      ch = y1 - y0;
+    /* Largest rendering that still fits the whole built area on screen. Filling
+       the screen instead would crop it — the estate is wide and a phone is
+       tall — and half the chalets would start off-screen, which is the first
+       thing anyone would call a bug. */
+    const width = Math.min(vp.w / cw, vp.h / ch * PLAN_RATIO);
+    const height = width / PLAN_RATIO;
+    return {
+      width,
+      height,
+      left: -x0 * width + (vp.w - cw * width) / 2,
+      top: -y0 * height + (vp.h - ch * height) / 2
+    };
+  }, [vp.w, vp.h, data.houses]);
   const onTouchStart = e => {
     if (e.target.closest('.pin-node') || e.target.closest('.map-top-bar') || e.target.closest('.map-floating-ctrls')) return;
     if (e.touches.length === 1) {
@@ -3087,6 +3156,7 @@ function MobileMapView(_ref3) {
     onSelectHouse: onSelectHouse
   }) : /*#__PURE__*/React.createElement("div", {
     className: "map-viewport",
+    ref: viewportRef,
     onTouchStart: onTouchStart,
     onTouchMove: onTouchMove
   }, /*#__PURE__*/React.createElement("div", {
@@ -3098,7 +3168,15 @@ function MobileMapView(_ref3) {
   }, /*#__PURE__*/React.createElement("img", {
     src: CAD_MASTER_PLAN_BASE64,
     alt: "CAD Master Plan",
-    className: "map-image"
+    className: "map-image",
+    style: plan ? {
+      width: plan.width,
+      height: plan.height,
+      left: plan.left,
+      top: plan.top
+    } : {
+      opacity: 0
+    }
   }), data.houses.map(h => {
     const hs = stats.byHouse[h.id] || {
       budget: 0,
@@ -3111,8 +3189,8 @@ function MobileMapView(_ref3) {
       key: h.id,
       className: `pin-node ${compact ? 'pin-compact' : ''}`,
       style: {
-        left: `${h.x}%`,
-        top: `${h.y}%`,
+        left: plan ? plan.left + h.x / 100 * plan.width : `${h.x}%`,
+        top: plan ? plan.top + h.y / 100 * plan.height : `${h.y}%`,
         transform: `translate(-50%, -50%) scale(${1 / zoom})`
       },
       onClick: () => onSelectHouse(h.id)
@@ -3163,12 +3241,12 @@ function MobileDashboardView(_ref4) {
   let data = _ref4.data,
     stats = _ref4.stats,
     onSelectHouse = _ref4.onSelectHouse;
-  const _useState8 = useState('ALL'),
-    selectedType = _useState8[0],
-    setSelectedType = _useState8[1];
-  const _useState9 = useState(''),
-    search = _useState9[0],
-    setSearch = _useState9[1];
+  const _useState9 = useState('ALL'),
+    selectedType = _useState9[0],
+    setSelectedType = _useState9[1];
+  const _useState0 = useState(''),
+    search = _useState0[0],
+    setSearch = _useState0[1];
   const filteredHouses = useMemo(() => {
     return (data.houses || []).filter(h => {
       if (selectedType !== 'ALL' && h.typeId !== selectedType) return false;
@@ -3588,15 +3666,15 @@ function MobileChaletModal(_ref7) {
     updateMaterialStage = _ref7.updateMaterialStage,
     toggleQaSignoff = _ref7.toggleQaSignoff;
   const dismiss = useSheetDismiss(onClose);
-  const _useState0 = useState('wbs'),
-    tab = _useState0[0],
-    setTab = _useState0[1];
-  const _useState1 = useState(''),
-    newSnagText = _useState1[0],
-    setNewSnagText = _useState1[1];
-  const _useState10 = useState('Σαλόνι'),
-    newSnagRoom = _useState10[0],
-    setNewSnagRoom = _useState10[1];
+  const _useState1 = useState('wbs'),
+    tab = _useState1[0],
+    setTab = _useState1[1];
+  const _useState10 = useState(''),
+    newSnagText = _useState10[0],
+    setNewSnagText = _useState10[1];
+  const _useState11 = useState('Σαλόνι'),
+    newSnagRoom = _useState11[0],
+    setNewSnagRoom = _useState11[1];
   const house = data.houses.find(h => h.id === houseId);
   const type = data.types.find(t => t.id === (house == null ? void 0 : house.typeId));
   const hStat = stats.byHouse[houseId] || {
@@ -3951,21 +4029,21 @@ function MobileChaletModal(_ref7) {
    MAIN MOBILE APPLICATION CONTROLLER
    ============================================================ */
 function ElatosMobileApp() {
-  const _useState11 = useState('map'),
-    activeTab = _useState11[0],
-    setActiveTab = _useState11[1];
-  const _useState12 = useState(null),
-    selectedHouseId = _useState12[0],
-    setSelectedHouseId = _useState12[1];
+  const _useState12 = useState('map'),
+    activeTab = _useState12[0],
+    setActiveTab = _useState12[1];
   const _useState13 = useState(null),
-    toastMsg = _useState13[0],
-    setToastMsg = _useState13[1];
+    selectedHouseId = _useState13[0],
+    setSelectedHouseId = _useState13[1];
   const _useState14 = useState(null),
-    paymentModal = _useState14[0],
-    setPaymentModal = _useState14[1];
+    toastMsg = _useState14[0],
+    setToastMsg = _useState14[1];
   const _useState15 = useState(null),
-    certificateModal = _useState15[0],
-    setCertificateModal = _useState15[1];
+    paymentModal = _useState15[0],
+    setPaymentModal = _useState15[1];
+  const _useState16 = useState(null),
+    certificateModal = _useState16[0],
+    setCertificateModal = _useState16[1];
   const showToast = msg => {
     setToastMsg(msg);
     setTimeout(() => setToastMsg(null), 3000);
@@ -4125,15 +4203,15 @@ function MobilePaymentModal(_ref8) {
     onSave = _ref8.onSave,
     onClose = _ref8.onClose;
   const dismiss = useSheetDismiss(onClose);
-  const _useState16 = useState(''),
-    amount = _useState16[0],
-    setAmount = _useState16[1];
-  const _useState17 = useState(new Date().toISOString().split('T')[0]),
-    date = _useState17[0],
-    setDate = _useState17[1];
-  const _useState18 = useState(''),
-    note = _useState18[0],
-    setNote = _useState18[1];
+  const _useState17 = useState(''),
+    amount = _useState17[0],
+    setAmount = _useState17[1];
+  const _useState18 = useState(new Date().toISOString().split('T')[0]),
+    date = _useState18[0],
+    setDate = _useState18[1];
+  const _useState19 = useState(''),
+    note = _useState19[0],
+    setNote = _useState19[1];
   return /*#__PURE__*/React.createElement("div", {
     className: "chalet-modal-overlay",
     onClick: dismiss
@@ -4245,12 +4323,12 @@ function MobileCertificateModal(_ref9) {
     stats = _ref9.stats,
     onClose = _ref9.onClose;
   const dismiss = useSheetDismiss(onClose);
-  const _useState19 = useState(String((data.payments || []).filter(p => p.contractorId === (contractor == null ? void 0 : contractor.id)).length + 1)),
-    certNo = _useState19[0],
-    setCertNo = _useState19[1];
-  const _useState20 = useState(new Date().toISOString().split('T')[0]),
-    certDate = _useState20[0],
-    setCertDate = _useState20[1];
+  const _useState20 = useState(String((data.payments || []).filter(p => p.contractorId === (contractor == null ? void 0 : contractor.id)).length + 1)),
+    certNo = _useState20[0],
+    setCertNo = _useState20[1];
+  const _useState21 = useState(new Date().toISOString().split('T')[0]),
+    certDate = _useState21[0],
+    setCertDate = _useState21[1];
   if (!contractor) return null;
   const cs = stats || {
     budget: 0,
